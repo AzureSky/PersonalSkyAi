@@ -7,8 +7,8 @@ WORKDIR /app
 # 复制当前目录下的所有文件到容器中  
 COPY . /app  
   
-# 安装依赖 (使用清华源加速)  
-RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple  
+# 安装依赖
+RUN pip install --no-cache-dir -r requirements.txt -i https://mirrors.cloud.tencent.com/pypi/simple 
   
 # 暴露 80 端口  
 EXPOSE 80  
