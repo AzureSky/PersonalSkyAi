@@ -1,10 +1,8 @@
 import os  
 import logging  
 import base64  
-import io  
 import json  
 from flask import Flask, request, jsonify  
-from PIL import Image  
 from google import genai  
 from google.genai import types  
   
@@ -49,51 +47,64 @@ def chat():
         prompt_text = data.get("prompt", "")  
         image_b64 = data.get("imageBase64")  
         raw_model = data.get("model", DEFAULT_MODEL)  
-        history_list = data.get("history", []) # 获取前端传来的纯文本历史  
+        history_list = data.get("history", [])   
   
         model_name = raw_model.replace("google/", "")  
           
         # 2. 构建上下文 (Contents)  
-        # Google SDK 接受一个 list，包含之前的对话和当前的消息  
         all_contents = []  
   
-        # A. 处理历史记录 (只包含文本，前端已经过滤了图片)  
+        # ==========================================  
+        # 处理历史记录 (History)  
+        # ==========================================  
         for msg in history_list:  
             role = "user" if msg['role'] == 'user' else "model"  
-            # 构造 Content 对象  
+            content_text = msg.get('content', '')  
+              
+            # 必须给一个占位符，防止空内容报错  
+            if not content_text or not content_text.strip():  
+                content_text = "[用户发送了一张图片]"  
+  
+            # ⚠️ 修正：必须用 from_text 包装，不能直接传字符串  
             all_contents.append(types.Content(  
                 role=role,  
-                parts=[types.Part.from_text(msg['content'])]  
+                parts=[types.Part.from_text(content_text)]  
             ))  
   
-        # B. 处理当前最新的消息 (文本 + 图片)  
+        # ==========================================  
+        # 处理当前消息 (Current Message)  
+        # ==========================================  
         current_parts = []  
           
-        # 如果有图片，解码并加入  
+        # A. 处理图片 (如果有)  
         if image_b64:  
             try:  
+                # 直接转换 bytes 并封装为 Part，比 PIL 更稳定  
                 img_data = base64.b64decode(image_b64)  
-                img_stream = io.BytesIO(img_data)  
-                img = Image.open(img_stream)  
-                current_parts.append(img)  
+                current_parts.append(types.Part.from_bytes(  
+                    data=img_data,   
+                    mime_type="image/jpeg"  
+                ))  
             except Exception as e:  
                 logger.error(f"图片解码失败: {e}")  
-                # 图片坏了不影响文本发送，记录日志即可  
   
+        # B. 处理文本 (如果有)  
         if prompt_text:  
-            current_parts.append(prompt_text)  
+            # ⚠️ 修正：必须用 from_text 包装  
+            current_parts.append(types.Part.from_text(prompt_text))  
           
-        # 将当前消息加入列表  
+        # C. 组装 Content  
         if current_parts:  
             all_contents.append(types.Content(  
                 role="user",  
                 parts=current_parts  
             ))  
           
+        # 再次校验  
         if not all_contents:  
-             return jsonify({"code": -1, "error": "内容为空"}), 400  
+             return jsonify({"code": -1, "error": "发送内容不能为空"}), 400  
   
-        logger.info(f"发送请求: Model={model_name}, HistoryCount={len(history_list)}, HasImg={bool(image_b64)}")  
+        logger.info(f"发送请求: Model={model_name}, HistoryCount={len(history_list)}")  
   
         # 3. 调用 AI  
         response = google_client.models.generate_content(  
@@ -111,8 +122,11 @@ def chat():
             return jsonify({"code": -1, "error": "AI 未返回文本"}), 500  
   
     except Exception as e:  
-        logger.error(f"处理异常: {e}")  
-        return jsonify({"code": -1, "error": str(e)}), 500  
+        logger.error(f"后端处理出错: {e}")  
+        # 打印详细错误堆栈到日志  
+        import traceback  
+        traceback.print_exc()  
+        return jsonify({"code": -1, "error": f"Internal Error: {str(e)}"}), 500  
   
 if __name__ == '__main__':  
     port = int(os.environ.get('PORT', 80))  
