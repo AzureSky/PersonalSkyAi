@@ -43,7 +43,6 @@ def chat():
     try:  
         data = request.get_json() or {}  
           
-        # 1. 获取参数  
         prompt_text = data.get("prompt", "")  
         image_b64 = data.get("imageBase64")  
         raw_model = data.get("model", DEFAULT_MODEL)  
@@ -51,36 +50,26 @@ def chat():
   
         model_name = raw_model.replace("google/", "")  
           
-        # 2. 构建上下文 (Contents)  
+        # --- 1. 构建请求内容 ---  
         all_contents = []  
   
-        # ==========================================  
-        # 处理历史记录  
-        # ==========================================  
+        # 处理历史  
         for msg in history_list:  
             role = "user" if msg['role'] == 'user' else "model"  
             content_text = msg.get('content', '')  
-              
             if not content_text or not content_text.strip():  
-                content_text = "[用户发送了一张图片]"  
-  
-            # 🟢 修正：直接使用构造函数 types.Part(text=...)  
-            # 不再使用 types.Part.from_text()  
+                content_text = "[图片/文件]"  
+              
             all_contents.append(types.Content(  
                 role=role,  
                 parts=[types.Part(text=content_text)]  
             ))  
   
-        # ==========================================  
         # 处理当前消息  
-        # ==========================================  
         current_parts = []  
-          
-        # A. 处理图片  
         if image_b64:  
             try:  
                 img_data = base64.b64decode(image_b64)  
-                # 🟢 修正：直接构建 Blob 对象，不使用快捷方法  
                 current_parts.append(types.Part(  
                     inline_data=types.Blob(  
                         mime_type="image/jpeg",  
@@ -88,15 +77,11 @@ def chat():
                     )  
                 ))  
             except Exception as e:  
-                logger.error(f"图片解码失败: {e}")  
+                logger.error(f"上传图片解码失败: {e}")  
   
-        # B. 处理文本  
         if prompt_text:  
-            # 🟢 修正：直接使用构造函数 types.Part(text=...)  
-            # 这里的 text= 是关键字参数，绝对不会错  
             current_parts.append(types.Part(text=prompt_text))  
           
-        # C. 组装  
         if current_parts:  
             all_contents.append(types.Content(  
                 role="user",  
@@ -104,30 +89,57 @@ def chat():
             ))  
           
         if not all_contents:  
-             return jsonify({"code": -1, "error": "发送内容不能为空"}), 400  
+             return jsonify({"code": -1, "error": "内容不能为空"}), 400  
   
-        logger.info(f"发送请求: Model={model_name}, HistoryCount={len(history_list)}")  
+        logger.info(f"发送请求: Model={model_name}")  
   
-        # 3. 调用 AI  
+        # --- 2. 调用 AI ---  
         response = google_client.models.generate_content(  
             model=model_name,  
             contents=all_contents  
         )  
   
-        # 4. 返回结果  
-        if response.text:  
+        # --- 3. 解析结果 (核心修改) ---  
+        reply_text = ""  
+        reply_image = None # 存放 AI 生成的图片 Base64  
+  
+        if response.candidates:  
+            for part in response.candidates[0].content.parts:  
+                # 3.1 提取文本  
+                if part.text:  
+                    reply_text += part.text  
+                  
+                # 3.2 提取生成的图片 (文生图关键)  
+                if part.inline_data:  
+                    logger.info("检测到 AI 返回了图片数据")  
+                    try:  
+                        # 获取二进制数据  
+                        img_bytes = part.inline_data.data  
+                        # 转为 Base64 字符串  
+                        b64_str = base64.b64encode(img_bytes).decode('utf-8')  
+                        mime_type = part.inline_data.mime_type or "image/png"  
+                        # 拼接成前端可用的格式  
+                        reply_image = f"data:{mime_type};base64,{b64_str}"  
+                    except Exception as img_e:  
+                        logger.error(f"AI 图片处理失败: {img_e}")  
+  
+        # --- 4. 返回结果 ---  
+        # 只要有文本或者有图片，都算成功  
+        if reply_text or reply_image:  
             return jsonify({  
                 "code": 0,  
-                "reply": response.text  
+                "reply": reply_text,  
+                "generated_image": reply_image   
             })  
         else:  
-            return jsonify({"code": -1, "error": "AI 未返回文本"}), 500  
+            logger.error("AI 响应解析为空 (可能是被安全策略拦截)")  
+            return jsonify({"code": -1, "error": "AI 未返回有效内容"}), 500  
   
     except Exception as e:  
-        logger.error(f"后端处理出错: {e}")  
+        logger.error(f"后端报错: {e}")  
         import traceback  
         traceback.print_exc()  
-        return jsonify({"code": -1, "error": f"Internal Error: {str(e)}"}), 500  
+        return jsonify({"code": -1, "error": f"Error: {str(e)}"}), 500  
   
 if __name__ == '__main__':  
     port = int(os.environ.get('PORT', 80))  
