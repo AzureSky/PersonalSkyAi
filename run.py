@@ -43,7 +43,8 @@ def process_ai_task(job_id, data):
         image_url = data.get("imageUrl") # 前端发来的 HTTP 链接  
         raw_model = data.get("model", DEFAULT_MODEL)  
         history_list = data.get("history", [])   
-  
+
+        use_search = data.get("useSearch", False)  
         model_name = raw_model.replace("google/", "")  
           
         all_contents = []  
@@ -82,11 +83,21 @@ def process_ai_task(job_id, data):
         if current_parts:  
             all_contents.append(types.Content(role="user", parts=current_parts))  
           
+        generate_config = None 
+        if use_search:  
+            logger.info(f"[{job_id}] 已开启联网搜索模式")  
+            # 启用 Google Search 工具  
+            generate_config = types.GenerateContentConfig(  
+                tools=[types.Tool(google_search=types.GoogleSearch())],  
+                response_modalities=["TEXT"] # 搜索模式下通常只返回文本  
+            )
+      
         # 3. 调用 AI  
         logger.info(f"[{job_id}] 请求 AI (Model: {model_name})...")  
         response = google_client.models.generate_content(  
             model=model_name,  
-            contents=all_contents  
+            contents=all_contents,
+            config=generate_config
         )  
   
         # 4. 解析结果  
