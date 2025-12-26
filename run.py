@@ -158,6 +158,11 @@ def query_task_status():
     else:  
         del TASK_STORE[job_id]  
         return jsonify({"code": -1, "status": "fail", "error": task.get("error")})  
+
+@app.route('/')  
+def ping():  
+    """唤醒接口，不做任何事，只为了拉起实例"""  
+    return "pong", 200  
   
 if __name__ == '__main__':  
     port = int(os.environ.get('PORT', 80))  
