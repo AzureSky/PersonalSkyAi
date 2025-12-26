@@ -1,20 +1,20 @@
 import os  
 import logging  
 import base64  
-import json  
+import uuid  
+import threading  
+import time  
+import requests  
 from flask import Flask, request, jsonify  
 from google import genai  
 from google.genai import types  
   
-# 基础配置  
 logging.basicConfig(level=logging.INFO)  
 logger = logging.getLogger(__name__)  
 app = Flask(__name__)  
   
-# 获取环境变量  
 API_KEY = os.environ.get("GEMINI_API_KEY")  
   
-# 初始化 Client  
 if API_KEY:  
     try:  
         google_client = genai.Client(  
@@ -29,117 +29,135 @@ if API_KEY:
     except Exception as e:  
         logger.error(f"Client 初始化失败: {e}")  
         google_client = None  
-else:  
-    logger.error("未找到 GEMINI_API_KEY 环境变量")  
-    google_client = None  
   
 DEFAULT_MODEL = "gemini-3-flash-preview"  
   
-@app.route('/api/chat', methods=['POST'])  
-def chat():  
-    if not google_client:  
-        return jsonify({"code": -1, "error": "服务端配置错误"}), 500  
+# --- 任务存储 (生产环境建议用Redis，这里用内存) ---  
+TASK_STORE = {}   
   
+def process_ai_task(job_id, data):  
+    """后台线程：下载图片 -> 调用 AI -> 存结果"""  
+    logger.info(f"[{job_id}] 开始处理任务...")  
     try:  
-        data = request.get_json() or {}  
-          
         prompt_text = data.get("prompt", "")  
-        image_b64 = data.get("imageBase64")  
+        image_url = data.get("imageUrl") # 前端发来的 HTTP 链接  
         raw_model = data.get("model", DEFAULT_MODEL)  
         history_list = data.get("history", [])   
   
         model_name = raw_model.replace("google/", "")  
           
-        # --- 1. 构建请求内容 ---  
         all_contents = []  
   
-        # 处理历史  
+        # 1. 处理历史 (只保留文本，避免历史图片过大)  
         for msg in history_list:  
             role = "user" if msg['role'] == 'user' else "model"  
-            content_text = msg.get('content', '')  
-            if not content_text or not content_text.strip():  
-                content_text = "[图片/文件]"  
-              
-            all_contents.append(types.Content(  
-                role=role,  
-                parts=[types.Part(text=content_text)]  
-            ))  
+            content_text = msg.get('content', '') or "[图片/文件]"  
+            all_contents.append(types.Content(role=role, parts=[types.Part(text=content_text)]))  
   
-        # 处理当前消息  
+        # 2. 处理当前消息  
         current_parts = []  
-        if image_b64:  
+          
+        # --- 下载前端上传的大图 ---  
+        if image_url:  
             try:  
-                img_data = base64.b64decode(image_b64)  
-                current_parts.append(types.Part(  
-                    inline_data=types.Blob(  
-                        mime_type="image/jpeg",  
-                        data=img_data  
-                    )  
-                ))  
+                logger.info(f"[{job_id}] 正在下载图片: {image_url}")  
+                # 这里的 timeout 设长一点，防止大图下载慢  
+                img_resp = requests.get(image_url, timeout=60)   
+                if img_resp.status_code == 200:  
+                    current_parts.append(types.Part(  
+                        inline_data=types.Blob(  
+                            mime_type="image/jpeg",   
+                            data=img_resp.content  
+                        )  
+                    ))  
+                    logger.info(f"[{job_id}] 图片下载完成，大小: {len(img_resp.content)} bytes")  
+                else:  
+                    logger.error(f"[{job_id}] 图片下载失败: {img_resp.status_code}")  
             except Exception as e:  
-                logger.error(f"上传图片解码失败: {e}")  
+                logger.error(f"[{job_id}] 图片下载异常: {e}")  
   
         if prompt_text:  
             current_parts.append(types.Part(text=prompt_text))  
           
         if current_parts:  
-            all_contents.append(types.Content(  
-                role="user",  
-                parts=current_parts  
-            ))  
+            all_contents.append(types.Content(role="user", parts=current_parts))  
           
-        if not all_contents:  
-             return jsonify({"code": -1, "error": "内容不能为空"}), 400  
-  
-        logger.info(f"发送请求: Model={model_name}")  
-  
-        # --- 2. 调用 AI ---  
+        # 3. 调用 AI  
+        logger.info(f"[{job_id}] 请求 AI (Model: {model_name})...")  
         response = google_client.models.generate_content(  
             model=model_name,  
             contents=all_contents  
         )  
   
-        # --- 3. 解析结果 (核心修改) ---  
+        # 4. 解析结果  
         reply_text = ""  
-        reply_image = None # 存放 AI 生成的图片 Base64  
+        reply_image = None   
   
         if response.candidates:  
             for part in response.candidates[0].content.parts:  
-                # 3.1 提取文本  
                 if part.text:  
                     reply_text += part.text  
-                  
-                # 3.2 提取生成的图片 (文生图关键)  
                 if part.inline_data:  
-                    logger.info("检测到 AI 返回了图片数据")  
-                    try:  
-                        # 获取二进制数据  
-                        img_bytes = part.inline_data.data  
-                        # 转为 Base64 字符串  
-                        b64_str = base64.b64encode(img_bytes).decode('utf-8')  
-                        mime_type = part.inline_data.mime_type or "image/png"  
-                        # 拼接成前端可用的格式  
-                        reply_image = f"data:{mime_type};base64,{b64_str}"  
-                    except Exception as img_e:  
-                        logger.error(f"AI 图片处理失败: {img_e}")  
+                    # 如果 AI 画了图，转 Base64 返回  
+                    b64_str = base64.b64encode(part.inline_data.data).decode('utf-8')  
+                    mime = part.inline_data.mime_type or "image/png"  
+                    reply_image = f"data:{mime};base64,{b64_str}"  
   
-        # --- 4. 返回结果 ---  
-        # 只要有文本或者有图片，都算成功  
-        if reply_text or reply_image:  
-            return jsonify({  
-                "code": 0,  
+        # 5. 任务成功，存入结果  
+        TASK_STORE[job_id] = {  
+            "status": "success",  
+            "data": {  
                 "reply": reply_text,  
-                "generated_image": reply_image   
-            })  
-        else:  
-            logger.error("AI 响应解析为空 (可能是被安全策略拦截)")  
-            return jsonify({"code": -1, "error": "AI 未返回有效内容"}), 500  
+                "generated_image": reply_image  
+            }  
+        }  
+        logger.info(f"[{job_id}] 任务完成")  
   
     except Exception as e:  
-        logger.error(f"后端报错: {e}")  
-        import traceback  
-        traceback.print_exc()  
-        return jsonify({"code": -1, "error": f"Error: {str(e)}"}), 500  
+        logger.error(f"[{job_id}] 任务失败: {e}")  
+        TASK_STORE[job_id] = {  
+            "status": "fail",  
+            "error": str(e)  
+        }  
+  
+@app.route('/api/chat', methods=['POST'])  
+def start_chat_task():  
+    """接口1：接收请求，开启线程"""  
+    if not google_client:  
+        return jsonify({"code": -1, "error": "服务端未就绪"}), 500  
+  
+    data = request.get_json() or {}  
+    job_id = str(uuid.uuid4()) # 生成唯一 ID  
+      
+    # 初始状态  
+    TASK_STORE[job_id] = {"status": "processing"}  
+      
+    # 异步执行  
+    thread = threading.Thread(target=process_ai_task, args=(job_id, data))  
+    thread.start()  
+      
+    return jsonify({"code": 0, "job_id": job_id})  
+  
+@app.route('/api/query', methods=['POST'])  
+def query_task_status():  
+    """接口2：前端轮询结果"""  
+    data = request.get_json() or {}  
+    job_id = data.get("job_id")  
+      
+    if not job_id or job_id not in TASK_STORE:  
+        return jsonify({"code": -1, "error": "任务过期或不存在"}), 404  
+          
+    task = TASK_STORE[job_id]  
+      
+    if task['status'] == 'processing':  
+        return jsonify({"code": 1, "status": "processing"}) # 1 = 继续等  
+    elif task['status'] == 'success':  
+        result = task['data']  
+        del TASK_STORE[job_id] # 取完即删  
+        return jsonify({"code": 0, "status": "success", **result})  
+    else:  
+        del TASK_STORE[job_id]  
+        return jsonify({"code": -1, "status": "fail", "error": task.get("error")})  
   
 if __name__ == '__main__':  
     port = int(os.environ.get('PORT', 80))  
