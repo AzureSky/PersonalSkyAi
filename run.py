@@ -55,52 +55,54 @@ def chat():
         all_contents = []  
   
         # ==========================================  
-        # 处理历史记录 (History)  
+        # 处理历史记录  
         # ==========================================  
         for msg in history_list:  
             role = "user" if msg['role'] == 'user' else "model"  
             content_text = msg.get('content', '')  
               
-            # 必须给一个占位符，防止空内容报错  
             if not content_text or not content_text.strip():  
                 content_text = "[用户发送了一张图片]"  
   
-            # ⚠️ 修正：必须用 from_text 包装，不能直接传字符串  
+            # 🟢 修正：直接使用构造函数 types.Part(text=...)  
+            # 不再使用 types.Part.from_text()  
             all_contents.append(types.Content(  
                 role=role,  
-                parts=[types.Part.from_text(content_text)]  
+                parts=[types.Part(text=content_text)]  
             ))  
   
         # ==========================================  
-        # 处理当前消息 (Current Message)  
+        # 处理当前消息  
         # ==========================================  
         current_parts = []  
           
-        # A. 处理图片 (如果有)  
+        # A. 处理图片  
         if image_b64:  
             try:  
-                # 直接转换 bytes 并封装为 Part，比 PIL 更稳定  
                 img_data = base64.b64decode(image_b64)  
-                current_parts.append(types.Part.from_bytes(  
-                    data=img_data,   
-                    mime_type="image/jpeg"  
+                # 🟢 修正：直接构建 Blob 对象，不使用快捷方法  
+                current_parts.append(types.Part(  
+                    inline_data=types.Blob(  
+                        mime_type="image/jpeg",  
+                        data=img_data  
+                    )  
                 ))  
             except Exception as e:  
                 logger.error(f"图片解码失败: {e}")  
   
-        # B. 处理文本 (如果有)  
+        # B. 处理文本  
         if prompt_text:  
-            # ⚠️ 修正：必须用 from_text 包装  
-            current_parts.append(types.Part.from_text(prompt_text))  
+            # 🟢 修正：直接使用构造函数 types.Part(text=...)  
+            # 这里的 text= 是关键字参数，绝对不会错  
+            current_parts.append(types.Part(text=prompt_text))  
           
-        # C. 组装 Content  
+        # C. 组装  
         if current_parts:  
             all_contents.append(types.Content(  
                 role="user",  
                 parts=current_parts  
             ))  
           
-        # 再次校验  
         if not all_contents:  
              return jsonify({"code": -1, "error": "发送内容不能为空"}), 400  
   
@@ -123,7 +125,6 @@ def chat():
   
     except Exception as e:  
         logger.error(f"后端处理出错: {e}")  
-        # 打印详细错误堆栈到日志  
         import traceback  
         traceback.print_exc()  
         return jsonify({"code": -1, "error": f"Internal Error: {str(e)}"}), 500  
